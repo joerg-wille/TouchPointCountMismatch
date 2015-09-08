@@ -1,0 +1,30 @@
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'org.javafxports:jfxmobile-plugin:1.0.0-b9'
+    }
+}
+
+apply plugin: 'org.javafxports.jfxmobile'
+
+repositories {
+    jcenter()
+}
+
+dependencies {
+    // slf4j: logging facade and implementation
+    compile 'org.slf4j:slf4j-api:1.7.12'
+    runtime 'org.slf4j:slf4j-simple:1.7.12'
+}
+
+mainClassName = 'org.test.touchpointcountmismatch.Main'
+
+jfxmobile {
+    android {
+        manifest = 'src/android/AndroidManifest.xml'
+        compileSdkVersion = '22'
+    }
+}
+
