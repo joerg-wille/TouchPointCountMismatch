@@ -22,7 +22,7 @@ public class Main extends Application {
         final Rectangle2D visualBounds = Screen.getPrimary().getVisualBounds();
 
         final Pane root = new Pane();
-        final Label label = new Label("Touch and release with at least 2 fingers simultaneously. TouchCount should be '0'");
+        final Label label = new Label("Touch and release with at least 2 fingers simultaneously. TouchCount should be '0' after release!");
         label.setTranslateX(0);
         label.setTranslateY(label.getFont().getSize() + 2);
         
