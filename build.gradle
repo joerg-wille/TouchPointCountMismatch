@@ -1,3 +1,5 @@
+// ANDROID_HOME set in ~/.gradle
+
 buildscript {
     repositories {
         jcenter()
@@ -20,6 +22,20 @@ dependencies {
 }
 
 mainClassName = 'org.test.touchpointcountmismatch.Main'
+if (!hasProperty('mainClass')) {
+    ext.mainClass = 'org.test.touchpointcountmismatch.Main'
+}
+
+jar {
+    manifest { 
+        attributes "Main-Class": "$mainClassName"
+    }  
+    
+    from {
+        configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
+        configurations.desktopRuntime.collect() { it.isDirectory() ? it : zipTree(it) }
+    }
+}
 
 jfxmobile {
     android {
