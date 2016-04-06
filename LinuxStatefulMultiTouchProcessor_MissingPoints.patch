@@ -1,0 +1,656 @@
+diff -Naur a/modules/graphics/src/main/java/com/sun/glass/ui/monocle/LinuxStatefulMultiTouchProcessor.java b/modules/graphics/src/main/java/com/sun/glass/ui/monocle/LinuxStatefulMultiTouchProcessor.java
+--- a/modules/graphics/src/main/java/com/sun/glass/ui/monocle/LinuxStatefulMultiTouchProcessor.java	2016-03-23 10:59:05.243915578 +0530
++++ b/modules/graphics/src/main/java/com/sun/glass/ui/monocle/LinuxStatefulMultiTouchProcessor.java	2016-03-24 15:23:29.827418645 +0530
+@@ -37,9 +37,8 @@
+     private static final int COORD_UNDEFINED = Integer.MIN_VALUE;
+     private int currentID = ID_UNASSIGNED;
+     private int currentSlot = 0;
+-
+-    private final Map<Integer, Integer> slotToIDMap =
+-            new HashMap<Integer, Integer>();
++    // mapping for slots to their current ID's and last valid x-/y-coordinates 
++    private final Map<Integer, TouchState.Point> slotContextMap = new HashMap<>();
+ 
+     LinuxStatefulMultiTouchProcessor(LinuxInputDevice device) {
+         super(device);
+@@ -51,6 +50,12 @@
+         LinuxEventBuffer buffer = device.getBuffer();
+         int x = COORD_UNDEFINED;
+         int y = COORD_UNDEFINED;
++        // Have we processed ABS_MT_POSITION_* coordinates for the current
++        // slot? We accept ABS_X and ABS_Y events only if we have not already
++        // received ABS_MT_POSITION_* coordinates. RT-38984
++        boolean processedMTCoordinates = false;
++        boolean processedMTReport = false;
++        TouchState.Point tempPoint;
+         // Some devices send EV_KEY BTN_TOUCH 0 to notify that all
+         // touch points are released.
+         boolean allPointsReleased = false;
+@@ -64,14 +69,21 @@
+                             // to the current slot.
+                             if (currentID != ID_UNASSIGNED
+                                     && (x != COORD_UNDEFINED || y != COORD_UNDEFINED)) {
++				if(MonocleSettings.settings.traceEventsVerbose) {
++					MonocleTrace.traceEvent("Updating point (id=%d) in ABS_MT_SLOT.", currentID);
++				}
+                                 updatePoint(x, y);
+                                 x = y = COORD_UNDEFINED;
++                                processedMTCoordinates = false;
++                                processedMTReport = false;
+                             }
+                             // We expect ABS_MT_SLOT and ABS_MT_TRACKING_ID
+                             // to precede the coordinates they describe
+                             currentSlot = value;
+-                            currentID = slotToIDMap.getOrDefault(currentSlot,
+-                                                                 ID_UNASSIGNED);
++                            if ((tempPoint = slotContextMap.get(currentSlot)) != null) {
++                                // tempPoint.id may be ID_UNASSIGNED
++                                currentID = tempPoint.id;
++                            }
+                             break;
+                         case LinuxInput.ABS_MT_TRACKING_ID:
+                             if (value == ID_UNASSIGNED && currentID != ID_UNASSIGNED) {
+@@ -79,19 +91,41 @@
+                             }
+                             currentID = value;
+                             if (currentID == ID_UNASSIGNED) {
+-                                slotToIDMap.remove(currentSlot);
++                                slotContextMap.get(currentSlot).id = ID_UNASSIGNED;
+                             } else {
+-                                slotToIDMap.put(currentSlot, currentID);
++                                TouchState.Point point = state.getPointForID(currentID);
++                                if (point == null) {
++                                    point = new TouchState.Point();
++                                    point.id = currentID;
++                                    // if we have last valid x-/y-coordinates stored for slot,
++                                    // copy to new point
++                                    if ((tempPoint = slotContextMap.get(currentSlot)) != null) {
++                                        point.x = tempPoint.x;
++                                        point.y = tempPoint.y;
++                                    }
++                                    state.addPoint(point);
++                                }
++                                slotContextMap.put(currentSlot, point);
+                             }
+                             break;
+                         case LinuxInput.ABS_X:
++                            if (x == COORD_UNDEFINED && !processedMTCoordinates) {
++                                x = value;
++                            }
++                            break;
+                         case LinuxInput.ABS_MT_POSITION_X:
++                            processedMTCoordinates = true;
+                             if (x == COORD_UNDEFINED) {
+                                 x = value;
+                             }
+                             break;
+                         case LinuxInput.ABS_Y:
++                            if (y == COORD_UNDEFINED && !processedMTCoordinates) {
++                                y = value;
++                            }
++                            break;
+                         case LinuxInput.ABS_MT_POSITION_Y:
++                            processedMTCoordinates = true;
+                             if (y == COORD_UNDEFINED) {
+                                 y = value;
+                             }
+@@ -104,7 +138,7 @@
+                     switch (buffer.getEventCode()) {
+                         case LinuxInput.BTN_TOUCH:
+                             if (buffer.getEventValue() == 0) {
+-                                allPointsReleased = true;
++                                allPointsReleased = false;
+                             }
+                             break;
+ 
+@@ -121,24 +155,35 @@
+                                     state.removePointForID(currentID);
+                                     currentID = ID_UNASSIGNED;
+                                 } else {
++					if(MonocleSettings.settings.traceEventsVerbose) {
++						MonocleTrace.traceEvent("Updating point (id=%d) in SYN_MT_REPORT.", currentID);
++					}
+                                     updatePoint(x, y);
+                                 }
+                             }
+                             x = y = COORD_UNDEFINED;
++                            processedMTCoordinates = false;
++                            processedMTReport = true;
+                             break;
+                         }
+                         case LinuxInput.SYN_REPORT:
+-                            if ((x != COORD_UNDEFINED || y != COORD_UNDEFINED)
+-                                    && currentID != ID_UNASSIGNED) {
+-                                // we received coordinates,
+-                                // but no SYN_MT_REPORT event. Assign these
++                            if (!processedMTReport && currentID != ID_UNASSIGNED) {
++                                // no SYN_MT_REPORT event received. Assign 
+                                 // coordinates to the current ID.
++				if(MonocleSettings.settings.traceEventsVerbose) {
++					MonocleTrace.traceEvent("Updating point (id=%d) in SYN_REPORT.", currentID);
++				}
+                                 updatePoint(x, y);
+                             } else if (allPointsReleased) {
++				if(MonocleSettings.settings.traceEventsVerbose) {
++					MonocleTrace.traceEvent("Clearing state! (id=%d) (CurrentSlot=%d) in SYN_REPORT.", currentID, currentSlot);
++				}
+                                 state.clear();
+                             }
+                             pipeline.pushState(state);
+                             x = y = COORD_UNDEFINED;
++                            processedMTCoordinates = false;
++                            processedMTReport = false;
+                             allPointsReleased = false;
+                             break;
+                         default: // ignore
+@@ -151,18 +196,30 @@
+     }
+ 
+     private void updatePoint(int x, int y) {
+-        TouchState.Point p = state
+-                .getPointForID(currentID);
+-        if (p == null) {
+-            p = new TouchState.Point();
+-            p.id = currentID;
+-            p = state.addPoint(p);
+-        }
++        TouchState.Point currentPoint = state.getPointForID(currentID);
++        TouchState.Point slotContextPoint = slotContextMap.get(currentSlot);
+         if (x != COORD_UNDEFINED) {
+-            p.x = x;
++            currentPoint.x = slotContextPoint.x = x;
++            if (MonocleSettings.settings.traceEventsVerbose) {
++                MonocleTrace.traceEvent("Remember valid x=%d for point (id=%d) in slot %d.", x, currentID, currentSlot);
++            }   
++        } else {
++            currentPoint.x = slotContextPoint.x;
++            if (MonocleSettings.settings.traceEventsVerbose) {
++                MonocleTrace.traceEvent("Using last valid x=%d for point (id=%d) from slot %d.", slotContextPoint.x, currentID, currentSlot);
++            }   
+         }
++        
+         if (y != COORD_UNDEFINED) {
+-            p.y = y;
++            currentPoint.y = slotContextPoint.y = y;
++            if (MonocleSettings.settings.traceEventsVerbose) {
++                MonocleTrace.traceEvent("Remember valid y=%d for point (id=%d) in slot %d.", y, currentID, currentSlot);
++            }   
++        } else {
++            currentPoint.y = slotContextPoint.y;
++            if (MonocleSettings.settings.traceEventsVerbose) {
++                MonocleTrace.traceEvent("Using last valid y=%d for point (id=%d) from slot %d.", slotContextPoint.y, currentID, currentSlot);
++            }   
+         }
+     }
+ 
+diff -Naur a/modules/graphics/src/main/java/com/sun/glass/ui/monocle/TouchPipeline.java b/modules/graphics/src/main/java/com/sun/glass/ui/monocle/TouchPipeline.java
+--- a/modules/graphics/src/main/java/com/sun/glass/ui/monocle/TouchPipeline.java	2016-03-23 10:59:05.247915527 +0530
++++ b/modules/graphics/src/main/java/com/sun/glass/ui/monocle/TouchPipeline.java	2016-03-24 15:23:16.502252248 +0530
+@@ -32,6 +32,8 @@
+     private TouchInput touch = TouchInput.getInstance();
+     private ArrayList<TouchFilter> filters = new ArrayList<TouchFilter>();
+     private TouchState flushState = new TouchState();
++    /** Used in pushState() */
++    private TouchState pushState = new TouchState();
+ 
+     /**
+      * Adds the filters in the given pipeline to this pipeline
+@@ -110,11 +112,14 @@
+     }
+ 
+     void pushState(TouchState state) {
++        // We apply filters to a copy of the state we are given; we don't
++        // want to modify the caller's state.
++        state.copyTo(pushState);
+         if (MonocleSettings.settings.traceEventsVerbose) {
+-            MonocleTrace.traceEvent("Pushing %s to %s", state, this);
++            MonocleTrace.traceEvent("Pushing %s to %s", pushState, this);
+         }
+-        if (!filter(state)) {
+-            touch.setState(state);
++        if (!filter(pushState)) {
++            touch.setState(pushState);
+         }
+     }
+ 
+diff -Naur a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/DellP2714TDevice.java b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/DellP2714TDevice.java
+--- a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/DellP2714TDevice.java	2016-03-23 10:59:15.479786895 +0530
++++ b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/DellP2714TDevice.java	1970-01-01 05:30:00.000000000 +0530
+@@ -1,194 +0,0 @@
+-/*
+- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+- *
+- * This code is free software; you can redistribute it and/or modify it
+- * under the terms of the GNU General Public License version 2 only, as
+- * published by the Free Software Foundation.  Oracle designates this
+- * particular file as subject to the "Classpath" exception as provided
+- * by Oracle in the LICENSE file that accompanied this code.
+- *
+- * This code is distributed in the hope that it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+- * version 2 for more details (a copy is included in the LICENSE file that
+- * accompanied this code).
+- *
+- * You should have received a copy of the GNU General Public License version
+- * 2 along with this work; if not, write to the Free Software Foundation,
+- * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+- *
+- * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+- * or visit www.oracle.com if you need additional information or have any
+- * questions.
+- */
+-
+-package com.sun.glass.ui.monocle.input.devices;
+-
+-import com.sun.glass.ui.monocle.TestApplication;
+-import com.sun.glass.ui.monocle.UInput;
+-import org.junit.Assume;
+-
+-import java.util.HashMap;
+-import java.util.Map;
+-
+-/**
+- * Dell P2714 touch screen monitor.
+- *
+- * DellP2714TDevice sends ABS_MT_POSITION_X and ABS_MT_POSITION_Y
+- * events per each touch-point.
+- * ABS_X & ABS_Y events are being sent only once per touch-event
+- * and are equal to ABS_MT_POSITION_X and ABS_MT_POSITION_Y of first touch-point.
+- * It uses BTN_TOUCH to notify presses and releases.
+- * It doesn't send "EV_SYN SYN_MT_REPORT" events, and also no events on coordinate
+- * that has not changed. It sends tracking IDs for touch points and uses slots.
+- */
+-public class DellP2714TDevice extends TestTouchDevice {
+-
+-    private int currentSlot = 0;
+-    private Map<Integer, Integer> slotsToPoints = new HashMap<>();
+-    private Map<Integer, Integer> pointsToSlots = new HashMap<>();
+-    private boolean BTN_TOUCH_1_sent = false;
+-    private int firstPointAbsX = 0;
+-    private int firstPointAbsY = 0;
+-    private int firstTouchPointId = 0;
+-    private boolean absXUpdated = false;
+-    private boolean absYUpdated = false;
+-
+-    public DellP2714TDevice() {
+-        super(10);
+-    }
+-
+-    @Override
+-    public void create() {
+-        Assume.assumeTrue(TestApplication.isMonocle());
+-        ui = new UInput();
+-        ui.processLine("OPEN");
+-        ui.processLine("EVBIT EV_SYN");
+-        ui.processLine("EVBIT EV_KEY");
+-        ui.processLine("KEYBIT BTN_TOUCH");
+-        ui.processLine("EVBIT EV_ABS");
+-        ui.processLine("ABSBIT ABS_X");
+-        ui.processLine("ABSBIT ABS_Y");
+-        ui.processLine("ABSMIN ABS_X 0");
+-        ui.processLine("ABSMAX ABS_X 32767");
+-        ui.processLine("ABSMIN ABS_Y 0");
+-        ui.processLine("ABSMAX ABS_Y 32767");
+-        ui.processLine("ABSBIT ABS_MT_SLOT");
+-        ui.processLine("ABSMIN ABS_MT_SLOT 0");
+-        ui.processLine("ABSMAX ABS_MT_SLOT 9");
+-        ui.processLine("ABSBIT ABS_MT_POSITION_X");
+-        ui.processLine("ABSBIT ABS_MT_POSITION_Y");
+-        ui.processLine("ABSMIN ABS_MT_POSITION_X 0");
+-        ui.processLine("ABSMAX ABS_MT_POSITION_X 32767");
+-        ui.processLine("ABSMIN ABS_MT_POSITION_Y 0");
+-        ui.processLine("ABSMAX ABS_MT_POSITION_Y 32767");
+-        ui.processLine("ABSBIT ABS_MT_TRACKING_ID");
+-        ui.processLine("ABSMIN ABS_MT_TRACKING_ID 0");
+-        ui.processLine("ABSMAX ABS_MT_TRACKING_ID 65535");
+-        ui.processLine("PROPBIT INPUT_PROP_DIRECT");
+-        ui.processLine("PROPERTY ID_INPUT_TOUCHSCREEN 1");
+-        ui.processLine("BUS 0x3");
+-        ui.processLine("VENDOR 0x2149");
+-        ui.processLine("PRODUCT 0x270b");
+-        ui.processLine("VERSION 0x110");
+-        ui.processLine("CREATE");
+-        setAbsScale(32768, 32768);
+-    }
+-
+-    @Override
+-    public int addPoint(double x, double y) {
+-        int p = super.addPoint(x, y);
+-        int slot = -1;
+-        for (int i = 0; i < points.length; i++) {
+-            if (!slotsToPoints.containsKey(i)) {
+-                slot = i;
+-                break;
+-            }
+-        }
+-        if (slot == -1) {
+-            throw new IllegalStateException("No free slot");
+-        }
+-        if (currentSlot != slot) {
+-            ui.processLine("EV_ABS ABS_MT_SLOT " + slot);
+-            currentSlot = slot;
+-        }
+-        slotsToPoints.put(slot, p);
+-        pointsToSlots.put(p, slot);
+-        ui.processLine("EV_ABS ABS_MT_TRACKING_ID " + getID(p));
+-        ui.processLine("EV_ABS ABS_MT_POSITION_X " + transformedXs[p]);
+-        ui.processLine("EV_ABS ABS_MT_POSITION_Y " + transformedYs[p]);
+-        if (pressedPoints == 1) {
+-            firstPointAbsX = transformedXs[p];
+-            firstPointAbsY = transformedYs[p];
+-            firstTouchPointId = getID(p);
+-            absXUpdated = true;
+-            absYUpdated = true;
+-        }
+-        return p;
+-    }
+-
+-    private int selectSlotForPoint(int p) {
+-        int slot = pointsToSlots.get(p);
+-        if (slot != currentSlot) {
+-            ui.processLine("EV_ABS ABS_MT_SLOT " + slot);
+-            currentSlot = slot;
+-        }
+-        return currentSlot;
+-    }
+-
+-    @Override
+-    public void removePoint(int p) {
+-        super.removePoint(p);
+-        int slot = selectSlotForPoint(p);
+-        pointsToSlots.remove(p);
+-        slotsToPoints.remove(slot);
+-        ui.processLine("EV_ABS ABS_MT_TRACKING_ID -1");
+-        if (pressedPoints == 0) {
+-            ui.processLine("EV_KEY BTN_TOUCH 0");
+-            BTN_TOUCH_1_sent = false;
+-            absXUpdated = false;
+-            absYUpdated = false;
+-        }
+-    }
+-
+-    @Override
+-    public void setPoint(int p, double x, double y) {
+-        int oldX = transformedXs[p];
+-        int oldY = transformedYs[p];
+-        super.setPoint(p, x, y);
+-        if (oldX != transformedXs[p]) {
+-            selectSlotForPoint(p);
+-            ui.processLine("EV_ABS ABS_MT_POSITION_X " + transformedXs[p]);
+-            if (firstTouchPointId == getID(p)) {
+-                firstPointAbsX = transformedXs[p];
+-                absXUpdated = true;
+-            }
+-        }
+-        if (oldY != transformedYs[p]) {
+-            selectSlotForPoint(p);
+-            ui.processLine("EV_ABS ABS_MT_POSITION_Y " + transformedYs[p]);
+-            if (firstTouchPointId == getID(p)) {
+-                firstPointAbsY = transformedYs[p];
+-                absYUpdated = true;
+-            }
+-        }
+-    }
+-
+-    @Override
+-    public void sync() {
+-        if ((pressedPoints > 0) && (!BTN_TOUCH_1_sent)) {
+-            ui.processLine("EV_KEY BTN_TOUCH 1");
+-            BTN_TOUCH_1_sent = true;
+-       }
+-        if (absXUpdated) {
+-            ui.processLine("EV_ABS ABS_X " + firstPointAbsX);
+-            absXUpdated = false;
+-        }
+-        if (absYUpdated) {
+-            ui.processLine("EV_ABS ABS_Y " + firstPointAbsY);
+-            absYUpdated = false;
+-        }
+-        super.sync();
+-    }
+-}
+diff -Naur a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/GeChic1002Device.java b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/GeChic1002Device.java
+--- a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/GeChic1002Device.java	1970-01-01 05:30:00.000000000 +0530
++++ b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/GeChic1002Device.java	2016-03-24 15:23:16.506250198 +0530
+@@ -0,0 +1,185 @@
++/*
++ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.  Oracle designates this
++ * particular file as subject to the "Classpath" exception as provided
++ * by Oracle in the LICENSE file that accompanied this code.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ */
++
++package com.sun.glass.ui.monocle.input.devices;
++
++import com.sun.glass.ui.monocle.TestApplication;
++import com.sun.glass.ui.monocle.UInput;
++import org.junit.Assume;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * GeChic Touch Monitor On-Lap 1002.
++ *
++ * This device uses multiple slots and does not send SYN_MT_REPORt between
++ * points. If only one of X and Y coordinates have changed,
++ * only the changed coordinate is sent. ABS_X and ABS_Y events are sent when
++ * the coordinates of slot 0 are updated. BTN_TOUCH events are sent when moving to or
++ * from a state with no presses.
++ */
++public class GeChic1002Device extends TestTouchDevice {
++
++    private int currentSlot = 0;
++    private Map<Integer, Integer> slotsToPoints = new HashMap<>();
++    private Map<Integer, Integer> pointsToSlots = new HashMap<>();
++    private int firstPointAbsX = 0;
++    private int firstPointAbsY = 0;
++    private boolean absXUpdated = false;
++    private boolean absYUpdated = false;
++    public GeChic1002Device() {
++        super(10);
++    }
++
++    @Override
++    public void create() {
++        Assume.assumeTrue(TestApplication.isMonocle());
++        ui = new UInput();
++        ui.processLine("OPEN");
++        ui.processLine("EVBIT EV_SYN");
++        ui.processLine("EVBIT EV_KEY");
++        ui.processLine("KEYBIT BTN_TOUCH");
++        ui.processLine("EVBIT EV_ABS");
++        ui.processLine("ABSBIT ABS_X");
++        ui.processLine("ABSBIT ABS_Y");
++        ui.processLine("ABSMIN ABS_X 0");
++        ui.processLine("ABSMAX ABS_X 32767");
++        ui.processLine("ABSMIN ABS_Y 0");
++        ui.processLine("ABSMAX ABS_Y 32767");
++        ui.processLine("ABSBIT ABS_MT_SLOT");
++        ui.processLine("ABSMIN ABS_MT_SLOT 0");
++        ui.processLine("ABSMAX ABS_MT_SLOT 9");
++        ui.processLine("ABSBIT ABS_MT_POSITION_X");
++        ui.processLine("ABSBIT ABS_MT_POSITION_Y");
++        ui.processLine("ABSMIN ABS_MT_POSITION_X 0");
++        ui.processLine("ABSMAX ABS_MT_POSITION_X 32767");
++        ui.processLine("ABSMIN ABS_MT_POSITION_Y 0");
++        ui.processLine("ABSMAX ABS_MT_POSITION_Y 32767");
++        ui.processLine("ABSBIT ABS_MT_TRACKING_ID");
++        ui.processLine("ABSMIN ABS_MT_TRACKING_ID 0");
++        ui.processLine("ABSMAX ABS_MT_TRACKING_ID 65535");
++        ui.processLine("PROPBIT INPUT_PROP_DIRECT");
++        ui.processLine("PROPERTY ID_INPUT_TOUCHSCREEN 1");
++        ui.processLine("BUS 0x3");
++        ui.processLine("VENDOR 0x2149");
++        ui.processLine("PRODUCT 0x270b");
++        ui.processLine("VERSION 0x110");
++        ui.processLine("CREATE");
++        setAbsScale(32768, 32768);
++    }
++
++    @Override
++    public int addPoint(double x, double y) {
++        int p = super.addPoint(x, y);
++        int slot = -1;
++        for (int i = 0; i < points.length; i++) {
++            if (!slotsToPoints.containsKey(i)) {
++                slot = i;
++                break;
++            }
++        }
++        if (slot == -1) {
++            throw new IllegalStateException("No free slot");
++        }
++        if (currentSlot != slot) {
++            ui.processLine("EV_ABS ABS_MT_SLOT " + slot);
++            currentSlot = slot;
++        }
++        slotsToPoints.put(slot, p);
++        pointsToSlots.put(p, slot);
++        ui.processLine("EV_ABS ABS_MT_TRACKING_ID " + getID(p));
++        ui.processLine("EV_ABS ABS_MT_POSITION_X " + transformedXs[p]);
++        ui.processLine("EV_ABS ABS_MT_POSITION_Y " + transformedYs[p]);
++        if (pressedPoints == 1) {
++            ui.processLine("EV_KEY BTN_TOUCH 1");
++        }
++        if (slot == 0) {
++            firstPointAbsX = transformedXs[p];
++            firstPointAbsY = transformedYs[p];
++            absXUpdated = true;
++            absYUpdated = true;
++        }
++        return p;
++    }
++
++    private int selectSlotForPoint(int p) {
++        int slot = pointsToSlots.get(p);
++        if (slot != currentSlot) {
++            ui.processLine("EV_ABS ABS_MT_SLOT " + slot);
++            currentSlot = slot;
++        }
++        return currentSlot;
++    }
++
++    @Override
++    public void removePoint(int p) {
++        super.removePoint(p);
++        int slot = selectSlotForPoint(p);
++        pointsToSlots.remove(p);
++        slotsToPoints.remove(slot);
++        ui.processLine("EV_ABS ABS_MT_TRACKING_ID -1");
++        if (pressedPoints == 0) {
++            ui.processLine("EV_KEY BTN_TOUCH 0");
++        }
++    }
++
++    @Override
++    public void setPoint(int p, double x, double y) {
++        int oldX = transformedXs[p];
++        int oldY = transformedYs[p];
++        super.setPoint(p, x, y);
++        if (oldX != transformedXs[p]) {
++            int slot = selectSlotForPoint(p);
++            ui.processLine("EV_ABS ABS_MT_POSITION_X " + transformedXs[p]);
++            if (slot == 0) {
++                firstPointAbsX = transformedXs[p];
++                absXUpdated = true;
++            }
++        }
++        if (oldY != transformedYs[p]) {
++            int slot = selectSlotForPoint(p);
++            ui.processLine("EV_ABS ABS_MT_POSITION_Y " + transformedYs[p]);
++            if (slot == 0) {
++                firstPointAbsY = transformedYs[p];
++                absYUpdated = true;
++            }
++        }
++    }
++
++    @Override
++    public void sync() {
++        if (absXUpdated) {
++            ui.processLine("EV_ABS ABS_X " + firstPointAbsX);
++            absXUpdated = false;
++        }
++        if (absYUpdated) {
++            ui.processLine("EV_ABS ABS_Y " + firstPointAbsY);
++            absYUpdated = false;
++        }
++        super.sync();
++    }
++
++}
+diff -Naur a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/TestTouchDevices.java b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/TestTouchDevices.java
+--- a/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/TestTouchDevices.java	2016-03-23 10:59:05.247915527 +0530
++++ b/tests/system/src/test/java/com/sun/glass/ui/monocle/input/devices/TestTouchDevices.java	2016-03-24 15:23:16.506250198 +0530
+@@ -65,6 +65,7 @@
+                 new SamsungLMS700KF07004Device(),
+                 new TabletDevice(),
+                 new DellP2714TDevice(),
++                new GeChic1002Device()
+         }));
+         return devices;
+     }
+diff -Naur a/tests/system/src/test/java/com/sun/glass/ui/monocle/MultiTouch2Test.java b/tests/system/src/test/java/com/sun/glass/ui/monocle/MultiTouch2Test.java
+--- a/tests/system/src/test/java/com/sun/glass/ui/monocle/MultiTouch2Test.java	2016-03-23 10:59:05.247915527 +0530
++++ b/tests/system/src/test/java/com/sun/glass/ui/monocle/MultiTouch2Test.java	2016-03-24 15:23:16.506250198 +0530
+@@ -321,4 +321,39 @@
+         TestLog.waitForLogContaining("Mouse released: %d, %d", x1, y1);
+         TestLog.waitForLogContaining("Mouse clicked: %d, %d", x1, y1);
+     }
++
++    @Test
++    public void dragFingersTogether() throws Exception {
++        int delta = device.getTapRadius() + 1;
++        TestLog.reset();
++        int x1 = (int) Math.round(width * 0.2);
++        int y1 = (int) Math.round(height * 0.2);
++        int x2 = (int) Math.round(width * 0.5);
++        int y2 = (int) Math.round(height * 0.5);
++
++        // press two fingers
++        int p1 = device.addPoint(x1, y1);
++        device.sync();
++        int p2 = device.addPoint(x2, y2);
++        device.sync();
++        // move finger 1 on the X axis
++        device.setPoint(p1, x1 + delta, y1);
++        device.sync();
++        TestLog.waitForLogContaining("TouchPoint: MOVED %d, %d", x1 + delta, y1);
++        TestLog.waitForLogContaining("TouchPoint: STATIONARY %d, %d", x2, y2);
++        // move finger 1 back at the same time as moving finger 2 on the Y axis
++        device.setPoint(p1, x1, y1);
++        device.setPoint(p2, x2, y2 + delta);
++        device.sync();
++        TestLog.waitForLogContaining("TouchPoint: MOVED %d, %d", x1, y1);
++        TestLog.waitForLogContaining("TouchPoint: MOVED %d, %d", x2, y2 + delta);
++        // release fingers and check coordinates
++        device.removePoint(p1);
++        device.removePoint(p2);
++        device.sync();
++        TestLog.waitForLogContaining("TouchPoint: RELEASED %d, %d", x1, y1);
++        TestLog.waitForLogContaining("TouchPoint: RELEASED %d, %d", x2, y2 + delta);
++        TestLog.waitForLogContaining("Mouse clicked: %d, %d", x1, y1);
++    }
++
+ }
